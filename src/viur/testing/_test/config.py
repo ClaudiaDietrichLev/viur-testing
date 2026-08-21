@@ -308,6 +308,38 @@ class ConfigModule(Module):
         return token
 
     @classmethod
+    def prime_daily_token(cls) -> str:
+        """Issue today's token at activation and return it.
+
+        The token is a pure function of database, namespace, project id and the
+        UTC day, so a restarted process derives the very same value. Until this
+        was primed here, though, the process only *learned* the value once
+        ``status`` or ``enter`` had run — so after a restart every request was
+        rejected with "no session token issued yet", even while the browser
+        still held a cookie that was valid for the rest of the day. Priming at
+        activation is what makes the documented promise true: arm the cookie
+        once in the morning and it keeps working until UTC midnight, restarts
+        included.
+
+        This does not weaken the gate. The token is not a secret — ``status``
+        hands it to any local caller — and the real protection is the
+        production guard plus the dev-server check. ``finish`` still clears the
+        token, so the validator's "no session token" branch stays reachable for
+        a deliberately ended session.
+
+        Derived only, deliberately: no datastore roundtrip. Activation already
+        probes the database, and adding a second write here would put a new
+        failure mode into the boot path for a value that is a pure function of
+        state the process already holds. The token *entity* is still written by
+        :meth:`_read_or_create_token` on the first ``status``/``enter`` — the
+        only thing reading it is ``finish``'s ``had_token`` flag, which is
+        informational.
+        """
+        token = cls._compute_daily_token()
+        cls.set_token(token)
+        return token
+
+    @classmethod
     def _delete_token(cls) -> bool:
         """Delete the token entity from the DB. ``True`` if one was present."""
         from viur.core.db import transport  # noqa: PLC0415

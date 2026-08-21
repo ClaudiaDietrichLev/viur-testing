@@ -5,6 +5,36 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **The daily token now really survives a server restart.** 0.5.1 made the token
+  value deterministic — derived from database, namespace, project id and the UTC
+  day — and the documentation promises that a cookie armed once in the morning
+  keeps working until UTC midnight, restarts included. The value did survive;
+  the process's knowledge of it did not. `ConfigModule._token` was only ever set
+  by `status` and `enter`, so a restarted process held `None` and answered every
+  request with `403 viur-test: no session token issued yet — call
+  /_test/config/status first`, while the browser was holding a cookie that was
+  still valid for the rest of the day.
+
+  `activate()` now primes today's token through the new
+  `ConfigModule.prime_daily_token()`, before the request validator goes live.
+  Manual browsing across a restart works without re-arming; the Playwright suite
+  was never affected, because its global setup posts to `status` on every run.
+
+  The token is *derived* here, with no datastore roundtrip: activation already
+  probes the database, and the value is a pure function of state the process
+  holds — no reason to put another way to fail into the boot path. The token
+  entity is still written by `status`/`enter` as before.
+
+  This does not widen access. The token is not a secret (`status` hands it to
+  any local caller) and the real protection remains the production guard and the
+  dev-server check; the previous 403 was a lifecycle artifact, not a gate.
+  `finish` still clears the token and ends the session until the next
+  `status`/`enter`.
+
 ## [0.5.1] — 2026-06-17
 
 Python package only — `@spltz/viur-testing` (npm) is unchanged and stays at

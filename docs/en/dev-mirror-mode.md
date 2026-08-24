@@ -64,3 +64,34 @@ file copies.)
     Seeding reads the live `(default)` database (read-only) and is PIN-gated. It
     can pull personal data into the test slice — review the `--exclude` list for
     PII before running.
+
+### Size limits
+
+Datastore caps a commit twice — at 500 mutations *and* at ~11 MiB of request
+payload — so `viur-mirror` tracks the serialized size of a batch and commits
+before either budget is spent (`PUT_BATCH_SIZE`, `PUT_BATCH_BYTES`).
+
+There is a third cap the copy cannot work around: **no single entity may exceed
+1 MiB**, and the copy is measured on the clone, which is *larger* than the
+source. Re-keying writes the target partition — database id and namespace — into
+the entity's own key and into every embedded relation key, so a relation-heavy
+entity grows by a noticeable percentage. Measured on one entity holding 1951
+relation keys:
+
+| clone built against | size | delta |
+| --- | ---: | ---: |
+| the source partition | 1 048 393 | +0 |
+| + target database id | 1 135 583 | +87 190 |
+| + target namespace | 1 163 607 | +115 214 |
+
+The expensive part is the database id, and mirroring cannot avoid it. An entity
+sitting in the last ~10 % below the limit in the source may therefore be
+impossible to copy. Those entities are **skipped and listed by kind and key** at
+the end of the run; everything else is copied, and the exit code stays `0`. Read
+that list — the slice is incomplete in exactly those places, and nothing later
+will remind you.
+
+!!! note "Rule of thumb"
+    Kinds with thousands of relations per entity are the candidates. In one
+    production dataset, 6 of 32 364 entities of a single kind were affected
+    (0.02 %).

@@ -154,6 +154,91 @@ def test_copy_kind_remaps_relation_keys_into_target_namespace():
     assert written["friend"].namespace == "dev-x"  # relation re-pointed into slice
 
 
+def test_copy_kind_commits_before_the_payload_budget_is_exceeded():
+    # Four ~500-byte entities against a 1200-byte budget: the mutation count
+    # never trips, so only the byte budget can force the split.
+    source = _FakeSourceClient(entities_by_kind={
+        "user": [_entity("user", i, {"blob": "x" * 500}) for i in range(4)],
+    })
+    target = _FakeTargetClient()
+
+    n = cli.copy_kind(source, target, "user", batch_bytes=1200)
+
+    assert n == 4
+    assert len(target.batches) > 1, "one commit — the byte budget is not enforced"
+    for batch in target.batches:
+        assert sum(cli.entity_size(e) for e in batch) <= 1200
+
+
+def test_copy_kind_still_honours_the_mutation_count():
+    # Tiny entities never approach the byte budget; the count must still split.
+    source = _FakeSourceClient(entities_by_kind={
+        "user": [_entity("user", i, {"n": i}) for i in range(7)],
+    })
+    target = _FakeTargetClient()
+
+    assert cli.copy_kind(source, target, "user", batch_size=3) == 7
+    assert [len(b) for b in target.batches] == [3, 3, 1]
+
+
+def test_copy_kind_keeps_one_commit_when_everything_fits():
+    source = _FakeSourceClient(entities_by_kind={
+        "user": [_entity("user", i, {"n": i}) for i in range(10)],
+    })
+    target = _FakeTargetClient()
+
+    assert cli.copy_kind(source, target, "user") == 10
+    assert len(target.batches) == 1
+
+
+def test_copy_kind_skips_entities_over_the_per_entity_limit():
+    # An entity above the 1 MiB limit cannot be written however small the batch
+    # is — it must be left out by name, not abort the run.
+    source = _FakeSourceClient(entities_by_kind={
+        "user": [
+            _entity("user", 1, {"n": 1}),
+            _entity("user", 2, {"blob": "x" * 5000}),
+            _entity("user", 3, {"n": 3}),
+        ],
+    })
+    target = _FakeTargetClient()
+    skipped: list = []
+
+    n = cli.copy_kind(source, target, "user", max_entity_bytes=600, skipped=skipped)
+
+    assert n == 2
+    assert [e.key.id_or_name for e in target.written] == [1, 3]
+    assert len(skipped) == 1
+    kind, key, size = skipped[0]
+    assert (kind, key) == ("user", 2)
+    assert size > 600
+
+
+def test_copy_kind_skips_silently_when_no_collector_is_passed():
+    # skipped=None is the documented default; the oversized entity is dropped
+    # without raising, so existing callers keep working.
+    source = _FakeSourceClient(entities_by_kind={
+        "user": [_entity("user", 1, {"blob": "x" * 5000})],
+    })
+    target = _FakeTargetClient()
+
+    assert cli.copy_kind(source, target, "user", max_entity_bytes=600) == 0
+    assert target.batches == []
+
+
+def test_entity_size_grows_when_the_clone_moves_to_another_partition():
+    # The reason MAX_ENTITY_BYTES is measured on the clone: re-keying writes the
+    # target partition into the entity key and into every relation key.
+    rel = datastore.Key("other", 9, project="proj-x", namespace=None)
+    ent = _entity("user", 1, {"friends": [rel] * 50}, namespace=None)
+
+    target = _FakeTargetClient(namespace="a-namespace")
+    clone = datastore.Entity(key=target.key(*ent.key.flat_path))
+    clone.update({k: cli._remap_value(v, target) for k, v in ent.items()})
+
+    assert cli.entity_size(clone) > cli.entity_size(ent)
+
+
 # ---------------------------------------------------------------------------
 # _remap_value
 # ---------------------------------------------------------------------------
@@ -255,6 +340,40 @@ def test_main_happy_explicit_kinds(patch_env, capsys):
     out = capsys.readouterr().out
     assert "user: 1" in out and "page: 2" in out
     assert "copied 3 entities (2 kinds)" in out
+
+
+def test_main_reports_entities_that_were_too_large_to_copy(patch_env, capsys, monkeypatch):
+    # The run stays successful — an outlier costs its own entity, not the slice.
+    # Nothing downstream would reveal the gap, so main() has to name it.
+    monkeypatch.setattr(cli, "MAX_ENTITY_BYTES", 600)
+    source = _FakeSourceClient(entities_by_kind={
+        "user": [_entity("user", 1, {"n": 1}), _entity("user", 2, {"blob": "x" * 5000})],
+    })
+    target = _FakeTargetClient(namespace="dev-andreas")
+    patch_env(source=source, target=target)
+
+    rc = cli.main([
+        "--project", "proj-x",
+        "--target-namespace", "dev-andreas",
+        "--kinds", "user",
+    ])
+
+    assert rc == 0
+    assert [e.key.id_or_name for e in target.written] == [1]
+
+    out = capsys.readouterr().out
+    assert "copied 1 entities (1 kinds)" in out
+    assert "1 entities not copied" in out
+    assert "user 2" in out
+
+
+def test_main_stays_quiet_when_nothing_was_skipped(patch_env, capsys):
+    source = _FakeSourceClient(entities_by_kind={"user": [_entity("user", 1, {"n": 1})]})
+    patch_env(source=source)
+
+    cli.main(["--project", "proj-x", "--target-namespace", "dev-x", "--kinds", "user"])
+
+    assert "not copied" not in capsys.readouterr().out
 
 
 def test_main_happy_enumerated_kinds_excludes_secrets(patch_env):

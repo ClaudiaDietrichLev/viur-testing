@@ -9,6 +9,41 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Fixed
 
+- **`viur-mirror` no longer overflows the commit payload limit.** `copy_kind`
+  batched on the mutation count alone (`PUT_BATCH_SIZE = 500`), but a Datastore
+  commit is capped twice — 500 mutations *and* ~11 MiB of request payload. Runs
+  over large entities aborted with `INVALID_ARGUMENT: Request payload size
+  exceeds the limit: 11534336 bytes`. The batch now also tracks the serialized
+  size and commits before the byte budget (`PUT_BATCH_BYTES`, 8 MiB) is spent.
+  Lowering the entity count is not an equivalent fix: entity sizes are skewed,
+  so the same count weighs orders of magnitude differently depending on which
+  entities land together.
+
+- **An entity too large to copy no longer aborts the whole run.** Datastore
+  rejects any single entity above 1 MiB, and the limit applies to the *clone*,
+  which is bigger than its source: re-keying writes the target partition
+  (database id, namespace) into the entity key and into every embedded relation
+  key. Measured on an entity with 1951 relation keys, the clone grew from
+  1 048 393 to 1 163 607 bytes — from just under the limit to over it. Such
+  entities cannot be mirrored at all; `copy_kind` now records and skips them and
+  `main` lists them by kind, key and size at the end of the run, instead of
+  losing every kind that had not been copied yet.
+
+### Changed
+
+- `copy_kind` gained the keyword arguments `batch_bytes`, `max_entity_bytes` and
+  `skipped`. The three size limits now default to `None` and are resolved from
+  the module constants **at call time** rather than bound at definition time, so
+  overriding `cli.PUT_BATCH_SIZE` and friends actually takes effect. Passing
+  `batch_size=` explicitly keeps working unchanged.
+
+- The `viur-mirror` documentation gained a *Size limits* section explaining the
+  clone inflation and what a skipped entity means for the copied slice.
+
+## [Unreleased]
+
+### Fixed
+
 - **The daily token now really survives a server restart.** 0.5.1 made the token
   value deterministic — derived from database, namespace, project id and the UTC
   day — and the documentation promises that a cookie armed once in the morning

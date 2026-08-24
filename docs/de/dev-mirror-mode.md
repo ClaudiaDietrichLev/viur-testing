@@ -64,3 +64,35 @@ auch Datei-Kopien erzeugen.)
     Das Seeding liest die Live-`(default)`-Datenbank (read-only) und ist
     PIN-gesichert. Es kann personenbezogene Daten in die Test-Scheibe ziehen —
     prüfe die `--exclude`-Liste auf PII, bevor du es ausführst.
+
+### Größenlimits
+
+Datastore deckelt einen Commit doppelt — bei 500 Mutationen *und* bei rund
+11 MiB Payload. `viur-mirror` zählt deshalb die serialisierte Größe eines
+Batches mit und schreibt, bevor eines der beiden Budgets aufgebraucht ist
+(`PUT_BATCH_SIZE`, `PUT_BATCH_BYTES`).
+
+Ein drittes Limit lässt sich nicht umgehen: **keine einzelne Entity darf über
+1 MiB liegen** — und gemessen wird der Klon, der *größer* ist als die Quelle.
+Das Umschlüsseln schreibt die Zielpartition, also Datenbankname und Namespace,
+in den Key der Entity und in jeden eingebetteten Relations-Key. Eine
+relationsschwere Entity wächst dadurch spürbar. Gemessen an einer Entity mit
+1951 Relations-Keys:
+
+| Klon gegen | Größe | Zuwachs |
+| --- | ---: | ---: |
+| die Quellpartition | 1 048 393 | +0 |
+| + Ziel-Datenbank | 1 135 583 | +87 190 |
+| + Ziel-Namespace | 1 163 607 | +115 214 |
+
+Der teure Teil ist der Datenbankname, und den kann das Spiegeln nicht
+weglassen. Eine Entity, die in der Quelle im letzten Zehntel vor dem Limit
+liegt, ist deshalb unter Umständen nicht kopierbar. Solche Entities werden
+**übersprungen und am Ende mit Kind und Key aufgelistet**; alles andere wird
+kopiert, der Exit-Code bleibt `0`. Lies diese Liste — genau dort ist die
+Scheibe unvollständig, und später erinnert dich nichts mehr daran.
+
+!!! note "Faustregel"
+    Kandidaten sind Kinds mit tausenden Relationen pro Entity. In einem
+    Produktivdatensatz waren 6 von 32 364 Entities eines Kinds betroffen
+    (0,02 %).

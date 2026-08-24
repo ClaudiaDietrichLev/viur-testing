@@ -63,6 +63,7 @@ import argparse
 import sys
 
 from google.cloud import datastore
+from google.cloud.datastore import helpers
 
 from viur.testing.constants import MIRROR_EXCLUDE_KINDS
 from viur.testing.mirror import ReadOnlyClient
@@ -88,6 +89,34 @@ def _database_arg(db_id: str) -> str:
 
 # Datastore commits accept at most 500 mutations; batch puts up to this many.
 PUT_BATCH_SIZE = 500
+
+# A commit is capped twice: by the mutation count above *and* by the request
+# payload size (11534336 bytes). Batching on the count alone overflows the
+# second limit as soon as entities are large — and entity sizes are typically
+# skewed, so a fixed smaller count is not a fix either: the same 50 entities
+# weigh 200 KiB or 20 MiB depending on which ones land together. copy_kind
+# therefore tracks the serialized size and commits before the budget is spent.
+# The headroom below the hard limit is deliberate: request framing and the
+# key/partition overhead the server adds are not counted here.
+PUT_BATCH_BYTES = 8 * 1024 * 1024
+
+# Datastore rejects any single entity above 1 MiB. This is measured on the
+# *clone*, which is bigger than the source it was built from: re-keying writes
+# the target partition — database id and namespace — into the entity's own key
+# and into every embedded relation key. An entity carrying thousands of
+# relations therefore grows by a noticeable percentage, and one sitting just
+# below the limit in the source can land above it in the copy.
+#
+# Measured on one production-sized entity holding 1951 relation keys:
+#
+#     source (same partition)          1048393 bytes   +0
+#     + target database id             1135583 bytes   +87190
+#     + target namespace               1163607 bytes   +115214   -> over 1 MiB
+#
+# The expensive part is the database id, and that is exactly what mirroring
+# cannot avoid. Such entities are not copyable at all, so copy_kind records and
+# skips them rather than letting one outlier abort the whole run.
+MAX_ENTITY_BYTES = 1024 * 1024
 
 
 def enumerate_kinds(source, exclude: set[str]) -> list[str]:
@@ -125,26 +154,76 @@ def _remap_value(value, target):
     return value
 
 
-def copy_kind(source, target, kind: str, *, batch_size: int = PUT_BATCH_SIZE) -> int:
+def entity_size(entity) -> int:
+    """Serialized size of *entity* in bytes — the same measure Datastore checks
+    its payload and per-entity limits against."""
+    pb = helpers.entity_to_protobuf(entity)
+    return len(type(pb).serialize(pb))
+
+
+def copy_kind(
+    source,
+    target,
+    kind: str,
+    *,
+    batch_size: int | None = None,
+    batch_bytes: int | None = None,
+    max_entity_bytes: int | None = None,
+    skipped: list[tuple[str, object, int]] | None = None,
+) -> int:
     """Copy every entity of *kind* from *source* into *target*, re-keying each
     entity's own key — and every key-valued property (relations), recursively —
-    onto *target*'s partition. Returns the number of entities written."""
+    onto *target*'s partition. Returns the number of entities written.
+
+    A commit is flushed when either limit would be exceeded: *batch_size*
+    mutations (default :data:`PUT_BATCH_SIZE`) or *batch_bytes* of serialized
+    payload (default :data:`PUT_BATCH_BYTES`). Entities whose clone exceeds
+    *max_entity_bytes* (default :data:`MAX_ENTITY_BYTES`) cannot be written at
+    all; they are appended to *skipped* as ``(kind, key_id_or_name, size)`` and
+    left out, so one outlier does not cost the entire run. Pass a list to learn
+    about them — :func:`main` reports it.
+
+    The three limits default to ``None`` and are resolved from the module
+    constants **at call time**, not bound at definition time. Overriding e.g.
+    ``cli.PUT_BATCH_BYTES`` therefore takes effect for every caller, which is
+    what makes the constants configuration rather than documentation.
+    """
+    batch_size = PUT_BATCH_SIZE if batch_size is None else batch_size
+    batch_bytes = PUT_BATCH_BYTES if batch_bytes is None else batch_bytes
+    max_entity_bytes = MAX_ENTITY_BYTES if max_entity_bytes is None else max_entity_bytes
+
     copied = 0
     batch: list[datastore.Entity] = []
+    pending_bytes = 0
+
+    def flush() -> None:
+        nonlocal copied, batch, pending_bytes
+        if batch:
+            target.put_multi(batch)
+            copied += len(batch)
+            batch = []
+            pending_bytes = 0
+
     for entity in source.query(kind=kind).fetch():
         clone = datastore.Entity(
             key=target.key(*entity.key.flat_path),
             exclude_from_indexes=tuple(entity.exclude_from_indexes),
         )
         clone.update({k: _remap_value(v, target) for k, v in entity.items()})
+
+        size = entity_size(clone)
+        if size > max_entity_bytes:
+            if skipped is not None:
+                skipped.append((kind, entity.key.id_or_name, size))
+            continue
+
+        if batch and (len(batch) >= batch_size or pending_bytes + size > batch_bytes):
+            flush()
+
         batch.append(clone)
-        if len(batch) >= batch_size:
-            target.put_multi(batch)
-            copied += len(batch)
-            batch = []
-    if batch:
-        target.put_multi(batch)
-        copied += len(batch)
+        pending_bytes += size
+
+    flush()
     return copied
 
 
@@ -220,8 +299,9 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     total = 0
+    skipped: list[tuple[str, object, int]] = []
     for kind in kinds:
-        n = copy_kind(source, target, kind)
+        n = copy_kind(source, target, kind, skipped=skipped)
         print(f"  • {kind}: {n}")
         total += n
 
@@ -230,6 +310,21 @@ def main(argv: list[str] | None = None) -> int:
         f"{args.target_database} / ns={args.target_namespace}. "
         f"Boot the dev server against that database + namespace."
     )
+
+    if skipped:
+        # Loud on purpose: the slice is incomplete and nothing later would say so.
+        print(
+            f"\n⚠  {len(skipped)} entities not copied — the clone exceeds the "
+            f"{MAX_ENTITY_BYTES // 1024 // 1024} MiB per-entity limit:"
+        )
+        for kind, key, size in skipped:
+            print(f"     {kind} {key}: {size:,} bytes")
+        print(
+            "   Re-keying writes the target partition (database id, namespace) into\n"
+            "   every embedded key, so relation-heavy entities close to the limit grow\n"
+            "   past it. These cannot be mirrored; the rest of the slice is complete."
+        )
+
     return 0
 
 

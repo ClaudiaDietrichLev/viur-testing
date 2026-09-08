@@ -614,7 +614,10 @@ def test_activate_happy_path(monkeypatch, router_validators):
     activation.activate(database="viur-tests")
 
     assert ConfigModule.is_active()
-    assert ConfigModule.has_token() is False
+    # Primed at activation, not on the first status call — that is what lets a
+    # cookie armed before a restart keep working for the rest of the day.
+    assert ConfigModule.has_token() is True
+    assert ConfigModule.current_token() == ConfigModule._compute_daily_token()
     assert ConfigModule.current_database() == "viur-tests"
     assert ConfigModule.current_project_id() == "proj-z"
     assert sink == [client]

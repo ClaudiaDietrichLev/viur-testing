@@ -409,6 +409,79 @@ def test_daily_token_differs_per_namespace(monkeypatch):
     assert alice != bob
 
 
+def test_prime_daily_token_makes_a_restart_transparent(monkeypatch):
+    """The regression this guards: same UTC day, server restarted, browser
+    still holding the cookie it was given before — the request has to pass.
+
+    Before priming, the restarted process had ``_token = None`` and rejected
+    every request with "no session token issued yet" until something called
+    ``status``, although the cookie the browser held was still today's valid
+    token. The value survived the restart; the process's knowledge of it did not.
+    """
+    import types
+
+    from viur.testing.constants import TOKEN_COOKIE
+    from viur.testing.validator import TokenValidator
+
+    monkeypatch.setattr(ConfigModule, "_current_day", classmethod(lambda cls: "2026-06-17"))
+
+    def request_carrying(cookie):
+        return types.SimpleNamespace(request=types.SimpleNamespace(
+            cookies={TOKEN_COOKIE: cookie}, headers={}, path="/json/some/route",
+        ))
+
+    # First boot: the browser is handed today's token.
+    ConfigModule.set_active(database="viur-tests", project_id="p", namespace="cd")
+    cookie = ConfigModule.prime_daily_token()
+    assert TokenValidator.validate(request_carrying(cookie)) is None
+
+    # Restart: process state gone, database and browser cookie untouched.
+    ConfigModule.reset()
+    ConfigModule.set_active(database="viur-tests", project_id="p", namespace="cd")
+    assert ConfigModule.current_token() is None  # nothing has run yet
+    ConfigModule.prime_daily_token()
+
+    assert ConfigModule.current_token() == cookie
+    assert TokenValidator.validate(request_carrying(cookie)) is None
+
+
+def test_prime_daily_token_does_not_touch_the_datastore(monkeypatch):
+    """Deliberately derived, not read: activation must not gain a database
+    roundtrip (and with it a new way for the boot to fail)."""
+    monkeypatch.setattr(
+        ConfigModule, "_read_or_create_token",
+        classmethod(lambda cls: pytest.fail("prime_daily_token hit the datastore")),
+    )
+    ConfigModule.set_active(database="viur-tests", project_id="p", namespace="cd")
+
+    assert ConfigModule.prime_daily_token() == ConfigModule._compute_daily_token()
+
+
+def test_prime_daily_token_requires_active_state():
+    with pytest.raises(RuntimeError, match="not active"):
+        ConfigModule.prime_daily_token()
+
+
+def test_finish_still_ends_the_session_after_priming(client_active):
+    """finish() must keep working as the off switch: priming happens at
+    activation, not per request, so a deliberately ended session stays ended
+    until the next status/enter."""
+    import types
+
+    from viur.testing.constants import TOKEN_COOKIE
+    from viur.testing.validator import TokenValidator
+
+    cookie = ConfigModule.prime_daily_token()
+    module = ConfigModule(moduleName="config", modulePath="_test/config")
+    module.finish()
+
+    assert ConfigModule.current_token() is None
+    result = TokenValidator.validate(types.SimpleNamespace(request=types.SimpleNamespace(
+        cookies={TOKEN_COOKIE: cookie}, headers={}, path="/json/some/route",
+    )))
+    assert result is not None and result[0] == 403
+
+
 def test_current_day_is_iso_utc_date():
     import re
 

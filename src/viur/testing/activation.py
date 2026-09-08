@@ -314,9 +314,13 @@ def activate(*, database: str = DEFAULT_DATABASE, namespace: str | None = None) 
        a ``database = <name>`` (and, when set, ``namespace = <name>``)
        line — see :mod:`viur.testing.banner`.
 
-    No token is created here — the session token is created and stored
-    by ``/_test/config/status`` directly in the test database, and
-    released by ``/_test/config/finish``.
+    11. Priming of today's session token via
+       :meth:`~viur.testing._test.config.ConfigModule.prime_daily_token`,
+       so a cookie armed before a restart keeps working for the rest of
+       the UTC day instead of being rejected until ``status`` runs again.
+
+    The token is derived, not invented — ``/_test/config/status`` returns
+    the same value and ``/_test/config/finish`` releases it.
 
     :param database: Name of the target test database. Default ``viur-tests``.
     :param namespace: Optional Datastore namespace to scope every read
@@ -354,6 +358,9 @@ def activate(*, database: str = DEFAULT_DATABASE, namespace: str | None = None) 
     ConfigModule.set_active(
         database=database, project_id=client.project, namespace=namespace,
     )
+    # Before the validator goes live, so it is never armed without knowing
+    # today's token — see ConfigModule.prime_daily_token.
+    ConfigModule.prime_daily_token()
 
     _install_request_validator()
     _open_bootstrap_paths_in_closed_system()

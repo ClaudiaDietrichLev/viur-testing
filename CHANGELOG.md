@@ -5,7 +5,13 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.5.2] — 2026-09-08
+
+Python package only — `@spltz/viur-testing` (npm) is unchanged and stays at
+0.5.0. Nothing in the runner contract moved: the token is derived the same way,
+`/_test/config/status` answers the same payload, and the changes below are a
+`viur-mirror` robustness fix, a token-lifecycle fix and reworded rejections.
+
 
 ### Fixed
 
@@ -28,21 +34,6 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   entities cannot be mirrored at all; `copy_kind` now records and skips them and
   `main` lists them by kind, key and size at the end of the run, instead of
   losing every kind that had not been copied yet.
-
-### Changed
-
-- `copy_kind` gained the keyword arguments `batch_bytes`, `max_entity_bytes` and
-  `skipped`. The three size limits now default to `None` and are resolved from
-  the module constants **at call time** rather than bound at definition time, so
-  overriding `cli.PUT_BATCH_SIZE` and friends actually takes effect. Passing
-  `batch_size=` explicitly keeps working unchanged.
-
-- The `viur-mirror` documentation gained a *Size limits* section explaining the
-  clone inflation and what a skipped entity means for the copied slice.
-
-## [Unreleased]
-
-### Fixed
 
 - **The daily token now really survives a server restart.** 0.5.1 made the token
   value deterministic — derived from database, namespace, project id and the UTC
@@ -69,6 +60,32 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   dev-server check; the previous 403 was a lifecycle artifact, not a gate.
   `finish` still clears the token and ends the session until the next
   `status`/`enter`.
+
+- **A rejected request now names an endpoint you can actually open.** The
+  three `TokenValidator` refusals described the failure but not the remedy, and
+  the one that tried pointed the wrong way: "no session token issued yet — call
+  `/_test/config/status` first" is unreachable advice for the case that produces
+  it, because `status` is `@force_post` and the reader is a human in a browser.
+  All three now name `/json/_test/config/enter`, the GET route manual browsing
+  is armed with; `status` is mentioned only as the test runner's entry point,
+  alongside it. The mismatch case also says *why* a cookie goes stale — the
+  token rotates at UTC midnight — since that is the one branch a developer hits
+  without having changed anything.
+
+  Messages only. Which requests pass and which are refused is unchanged, and the
+  new `ENTER_PATH` / `STATUS_PATH` constants are documentation strings, not
+  routing.
+
+### Changed
+
+- `copy_kind` gained the keyword arguments `batch_bytes`, `max_entity_bytes` and
+  `skipped`. The three size limits now default to `None` and are resolved from
+  the module constants **at call time** rather than bound at definition time, so
+  overriding `cli.PUT_BATCH_SIZE` and friends actually takes effect. Passing
+  `batch_size=` explicitly keeps working unchanged.
+
+- The `viur-mirror` documentation gained a *Size limits* section explaining the
+  clone inflation and what a skipped entity means for the copied slice.
 
 ## [0.5.1] — 2026-06-17
 
@@ -595,6 +612,7 @@ in:
    module instance is silently skipped. The host-side wiring
    registers `TestModule` as a *class*, not as an instance.
 
+[0.5.2]: https://github.com/sprengplatz/viur-testing/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/sprengplatz/viur-testing/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/sprengplatz/viur-testing/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/sprengplatz/viur-testing/compare/v0.3.0-npm...v0.4.0

@@ -4,7 +4,7 @@ import types
 
 import pytest
 
-from viur.testing.constants import TOKEN_COOKIE
+from viur.testing.constants import ENTER_PATH, STATUS_PATH, TOKEN_COOKIE
 from viur.testing._test.config import ConfigModule
 from viur.testing.validator import ProductionGuardValidator, TokenValidator
 
@@ -54,6 +54,10 @@ def test_validate_returns_403_when_no_token_issued_yet():
     assert result is not None
     assert result[0] == 403
     assert "no session token" in result[2]
+    # The message has to name a URL a human can actually navigate to: status
+    # is force_post, so telling a browser to "call status first" is a dead end.
+    assert ENTER_PATH in result[2]
+    assert STATUS_PATH in result[2]
 
 
 def test_validate_returns_403_when_cookie_missing():
@@ -63,6 +67,7 @@ def test_validate_returns_403_when_cookie_missing():
     assert result is not None
     assert result[0] == 403
     assert "missing" in result[2].lower()
+    assert ENTER_PATH in result[2]
 
 
 def test_validate_returns_403_when_token_wrong():
@@ -74,6 +79,26 @@ def test_validate_returns_403_when_token_wrong():
     assert result is not None
     assert result[0] == 403
     assert "invalid" in result[2].lower()
+    assert ENTER_PATH in result[2]
+
+
+def test_rejection_messages_never_send_a_browser_to_a_post_only_endpoint():
+    """The regression this guards: every rejection a developer can hit while
+    browsing manually has to point at ``enter``.
+
+    ``status`` is ``@force_post``; a message telling someone to open it in the
+    address bar describes a route that cannot work. Only the "no session"
+    branch may mention ``status`` at all, and only as the runner's entry point
+    alongside ``enter``.
+    """
+    ConfigModule.set_active(database="viur-tests", project_id="p")
+    ConfigModule.set_token("secret")
+
+    for cookies in ({}, {TOKEN_COOKIE: "stale"}):
+        result = TokenValidator.validate(_make_request(cookies=cookies))
+        assert result is not None
+        assert ENTER_PATH in result[2]
+        assert STATUS_PATH not in result[2]
 
 
 def test_validate_passes_with_correct_cookie():

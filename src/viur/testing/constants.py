@@ -55,6 +55,28 @@ is one of these values and ``<renderer>`` is a single optional segment
 is treated as a regular request and requires the token.
 """
 
+ENTER_PATH = "/json/_test/config/enter"
+"""Path a developer navigates to in order to arm manual browsing.
+
+Quoted verbatim in the :class:`~viur.testing.validator.TokenValidator`
+rejection messages, so a 403 tells you what to do about it instead of only
+what went wrong. The ``json`` renderer prefix is the form the documentation
+tells people to open (see ``docs/en/dev-mirror-mode.md``); a bare
+``/_test/config/enter`` is accepted by the validator too, but naming one
+concrete, copy-pasteable URL beats naming a pattern.
+
+``enter`` and not ``status``: this hint is read by a human in a browser, and
+``status`` is ``@force_post`` — navigating to it cannot work.
+"""
+
+STATUS_PATH = "/json/_test/config/status"
+"""Path the Playwright runner POSTs to in order to open a session.
+
+Named alongside :data:`ENTER_PATH` in the "no active session" message
+because that branch is also what a runner sees when its global setup has
+not run yet.
+"""
+
 MIRROR_EXCLUDE_KINDS: frozenset[str] = frozenset({
     "viur-conf",
     "viur-session",

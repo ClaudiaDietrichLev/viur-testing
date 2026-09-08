@@ -108,7 +108,12 @@ class TokenValidator(RequestValidator):
 
     @staticmethod
     def validate(request: "BrowseHandler") -> tuple[int, str, str] | None:
-        from .constants import BOOTSTRAP_ACTIONS, TOKEN_COOKIE  # noqa: PLC0415
+        from .constants import (  # noqa: PLC0415
+            BOOTSTRAP_ACTIONS,
+            ENTER_PATH,
+            STATUS_PATH,
+            TOKEN_COOKIE,
+        )
         from ._test.config import ConfigModule  # noqa: PLC0415
 
         if not ConfigModule.is_active():
@@ -120,20 +125,33 @@ class TokenValidator(RequestValidator):
         if _is_bootstrap_path(path, BOOTSTRAP_ACTIONS):
             return None
 
+        # Every message below names ENTER_PATH: a refusal a developer can hit
+        # while browsing is only useful if it says how to get back in, and
+        # ENTER_PATH is the one route a browser can reach (status is force_post).
         active_token = ConfigModule.current_token()
         if active_token is None:
-            return (
-                403,
-                "Forbidden",
-                "viur-test: no session token issued yet — call /_test/config/status first",
+            reason = (
+                f"viur-test: no session token — the session was ended by"
+                f" /_test/config/finish. Open {ENTER_PATH} to arm this browser"
+                f" again (test runners: POST {STATUS_PATH})."
             )
+            return 403, "Forbidden", reason
 
         cookies = getattr(request.request, "cookies", None) or {}
         provided = cookies.get(TOKEN_COOKIE)
         if not provided:
-            return 403, "Forbidden", f"viur-test: missing {TOKEN_COOKIE} cookie"
+            reason = (
+                f"viur-test: missing {TOKEN_COOKIE} cookie —"
+                f" open {ENTER_PATH} to arm this browser."
+            )
+            return 403, "Forbidden", reason
 
         if not hmac.compare_digest(provided, active_token):
-            return 403, "Forbidden", f"viur-test: invalid {TOKEN_COOKIE} cookie"
+            reason = (
+                f"viur-test: invalid {TOKEN_COOKIE} cookie — most likely stale,"
+                f" the token rotates at UTC midnight."
+                f" Open {ENTER_PATH} to arm this browser again."
+            )
+            return 403, "Forbidden", reason
 
         return None

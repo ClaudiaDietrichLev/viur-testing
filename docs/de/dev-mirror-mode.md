@@ -20,7 +20,7 @@ VIUR_TESTING=ak viur run develop
 
 `VIUR_TESTING=<namespace>` bootet den Test-Modus in diesem Namespace (hier `ak`);
 `VIUR_TESTING=1` nutzt den Default-Namespace. Jeder Entwickler wählt seinen
-eigenen Namespace, damit die gespiegelten Scheiben isoliert bleiben. Auch CI/CD
+eigenen Namespace, damit die gespiegelten Daten isoliert bleiben. Auch CI/CD
 sollte einen eigenen Namespace haben.
 
 ## Manuelles Browsen scharfschalten (das Cookie)
@@ -62,8 +62,29 @@ auch Datei-Kopien erzeugen.)
 
 !!! warning "Seeding liest Live-Produktionsdaten"
     Das Seeding liest die Live-`(default)`-Datenbank (read-only) und ist
-    PIN-gesichert. Es kann personenbezogene Daten in die Test-Scheibe ziehen —
+    PIN-gesichert. Es kann personenbezogene Daten in den Test-Namespace ziehen —
     prüfe die `--exclude`-Liste auf PII, bevor du es ausführst.
+
+### Mit leerem Namespace starten: `--clean`
+
+Die Kopie schreibt Entity für Entity und löscht nie. Ein zweiter Mirror
+überschreibt also Entities mit gleichem Key, lässt aber alles andere stehen,
+auch das, was Testläufe angelegt haben. `--clean` leert den Ziel-Namespace
+vorher:
+
+```sh
+viur-mirror --project my-gcp-project --target-namespace ak --clean
+```
+
+- Welche Kinds gelöscht werden, liest `--clean` aus dem **Ziel**-Namespace.
+  Kinds, die es nur dort gibt, verschwinden also auch. Mit `--kinds` werden
+  nur diese Kinds gelöscht.
+- `--exclude` gilt auch fürs Löschen: Standardmäßig behält dein Namespace seine
+  eigene `viur-conf` (hmacKey), Sessions und File-Entities.
+- Der PIN-Prompt listet die Kinds, die gelöscht werden; gelöscht wird erst
+  nach der PIN.
+- Mit leerem `--target-namespace` verweigert `--clean` den Lauf: Der
+  Default-Namespace der Testdatenbank wird geteilt.
 
 ### Größenlimits
 
@@ -90,7 +111,7 @@ weglassen. Eine Entity, die in der Quelle im letzten Zehntel vor dem Limit
 liegt, ist deshalb unter Umständen nicht kopierbar. Solche Entities werden
 **übersprungen und am Ende mit Kind und Key aufgelistet**; alles andere wird
 kopiert, der Exit-Code bleibt `0`. Lies diese Liste — genau dort ist die
-Scheibe unvollständig, und später erinnert dich nichts mehr daran.
+Kopie unvollständig, und später erinnert dich nichts mehr daran.
 
 !!! note "Faustregel"
     Kandidaten sind Kinds mit tausenden Relationen pro Entity. In einem

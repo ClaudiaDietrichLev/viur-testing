@@ -65,6 +65,27 @@ file copies.)
     can pull personal data into the test slice — review the `--exclude` list for
     PII before running.
 
+### Start from an empty namespace: `--clean`
+
+The copy writes entity by entity and never deletes, so a second mirror
+overwrites entities with the same key but leaves everything else in place,
+including whatever test runs created. `--clean` empties the target namespace
+first:
+
+```sh
+viur-mirror --project my-gcp-project --target-namespace ak --clean
+```
+
+- The kinds to delete are read from the **target** namespace, so kinds that
+  only exist there are removed too. With `--kinds`, only those kinds are
+  deleted.
+- `--exclude` applies to the clean as well: by default the slice keeps its own
+  `viur-conf` (hmacKey), sessions and file entities.
+- The PIN prompt lists the kinds about to be deleted; deleting starts only
+  after the PIN.
+- `--clean` refuses an empty `--target-namespace`: the default namespace of
+  the test database is shared.
+
 ### Size limits
 
 Datastore caps a commit twice — at 500 mutations *and* at ~11 MiB of request

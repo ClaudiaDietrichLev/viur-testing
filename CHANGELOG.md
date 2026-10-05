@@ -5,6 +5,18 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **`viur-mirror --clean` empties the target namespace before copying.** The
+  copy only ever writes, so re-mirroring left behind every entity created
+  since the last run. `--clean` enumerates the kinds of the *target* namespace
+  (or takes `--kinds`), honours `--exclude` (the slice keeps its own
+  `viur-conf`), names them in the PIN prompt and deletes them keys-only in
+  500-key batches before the copy starts. It refuses an empty
+  `--target-namespace`, since the test database's default namespace is shared.
+
 ## [0.5.2] — 2026-09-08
 
 Python package only — `@spltz/viur-testing` (npm) is unchanged and stays at

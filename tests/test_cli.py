@@ -30,8 +30,11 @@ class _FakeQuery:
     def __init__(self, items):
         self._items = items
 
+    def keys_only(self):
+        pass
+
     def fetch(self, limit=None):
-        return list(self._items)
+        return list(self._items)[:limit]
 
 
 def _entity(kind, id_, props, *, project="proj-x", namespace=None):
@@ -57,19 +60,39 @@ class _FakeSourceClient:
 
 
 class _FakeTargetClient:
-    """Records every ``put_multi`` batch and rebuilds keys in its namespace."""
+    """Records every ``put_multi`` batch and rebuilds keys in its namespace.
 
-    def __init__(self, *, project="proj-x", database="viur-tests", namespace="dev-x"):
+    *existing* seeds entities already in the namespace (per kind); they are
+    served by ``query`` and removed by ``delete_multi``, which records its
+    batches. ``events`` logs puts and deletes in call order."""
+
+    def __init__(self, *, project="proj-x", database="viur-tests", namespace="dev-x", existing=None):
         self.project = project
         self.database = database
         self.namespace = namespace
         self.batches: list[list] = []
+        self.existing = {kind: list(ents) for kind, ents in (existing or {}).items()}
+        self.deleted_batches: list[list] = []
+        self.events: list[tuple[str, str]] = []
 
     def key(self, *flat_path):
         return datastore.Key(*flat_path, project=self.project, namespace=self.namespace)
 
+    def query(self, *, kind):
+        if kind == "__kind__":
+            return _FakeQuery([_Meta(n) for n, ents in self.existing.items() if ents])
+        return _FakeQuery(self.existing.get(kind, []))
+
+    def delete_multi(self, keys):
+        keys = list(keys)
+        self.deleted_batches.append(keys)
+        for key in keys:
+            self.existing[key.kind] = [e for e in self.existing[key.kind] if e.key != key]
+            self.events.append(("delete", key.kind))
+
     def put_multi(self, entities):
         self.batches.append(list(entities))
+        self.events.extend(("put", e.key.kind) for e in entities)
 
     @property
     def written(self):
@@ -237,6 +260,30 @@ def test_entity_size_grows_when_the_clone_moves_to_another_partition():
     clone.update({k: cli._remap_value(v, target) for k, v in ent.items()})
 
     assert cli.entity_size(clone) > cli.entity_size(ent)
+
+
+# ---------------------------------------------------------------------------
+# clean_kind
+# ---------------------------------------------------------------------------
+
+
+def _target_entity(kind, id_, namespace="dev-x"):
+    return _entity(kind, id_, {}, namespace=namespace)
+
+
+def test_clean_kind_deletes_in_batches_until_empty():
+    target = _FakeTargetClient(existing={"user": [_target_entity("user", i) for i in range(5)]})
+
+    assert cli.clean_kind(target, "user", batch_size=2) == 5
+    assert [len(b) for b in target.deleted_batches] == [2, 2, 1]
+    assert target.existing["user"] == []
+
+
+def test_clean_kind_on_an_empty_kind_deletes_nothing():
+    target = _FakeTargetClient()
+
+    assert cli.clean_kind(target, "user") == 0
+    assert target.deleted_batches == []
 
 
 # ---------------------------------------------------------------------------
@@ -442,6 +489,92 @@ def test_main_normalises_default_database_to_empty_string(monkeypatch):
     assert rc == 0
     assert seen["source_db"] == ""           # never the literal "(default)"
     assert seen["target_db"] == "viur-tests"
+
+
+# ---------------------------------------------------------------------------
+# main — --clean
+# ---------------------------------------------------------------------------
+
+
+def test_main_clean_empties_target_kinds_before_copying(patch_env, monkeypatch, capsys):
+    # "leftover" exists only in the target (left behind by test runs) — the
+    # clean must find it by enumerating the target, not the source.
+    source = _FakeSourceClient(
+        kind_names=["user"],
+        entities_by_kind={"user": [_entity("user", 1, {})]},
+    )
+    target = _FakeTargetClient(existing={
+        "user": [_target_entity("user", 1), _target_entity("user", 2)],
+        "leftover": [_target_entity("leftover", 7)],
+        "viur-conf": [_target_entity("viur-conf", "viur-conf")],
+    })
+    patch_env(source=source, target=target)
+    pin_lines = []
+    monkeypatch.setattr(cli, "run_pin_challenge", lambda *, context_lines: pin_lines.extend(context_lines))
+
+    rc = cli.main(["--project", "proj-x", "--target-namespace", "dev-x", "--clean"])
+
+    assert rc == 0
+    assert target.existing["leftover"] == []
+    # the slice keeps its own viur-conf (hmacKey): excludes win for the clean too.
+    assert len(target.existing["viur-conf"]) == 1
+    # every delete happens before the first put.
+    ops = [op for op, _ in target.events]
+    assert ops == ["delete"] * 3 + ["put"]
+    assert [e.key.id_or_name for e in target.written] == [1]
+    # the PIN prompt names what is about to be deleted.
+    assert "clean   = user, leftover" in pin_lines
+    out = capsys.readouterr().out
+    assert "user: 2 deleted" in out and "leftover: 1 deleted" in out
+
+
+def test_main_clean_with_explicit_kinds_deletes_only_those(patch_env):
+    source = _FakeSourceClient(entities_by_kind={"user": [_entity("user", 1, {})]})
+    target = _FakeTargetClient(existing={
+        "user": [_target_entity("user", 5)],
+        "page": [_target_entity("page", 6)],
+    })
+    patch_env(source=source, target=target)
+
+    rc = cli.main(["--project", "proj-x", "--target-namespace", "dev-x", "--kinds", "user", "--clean"])
+
+    assert rc == 0
+    assert target.existing["user"] == []
+    assert len(target.existing["page"]) == 1  # not named in --kinds → untouched
+
+
+def test_main_clean_on_an_empty_namespace_says_so(patch_env, monkeypatch):
+    source = _FakeSourceClient(kind_names=["user"], entities_by_kind={"user": [_entity("user", 1, {})]})
+    target = _FakeTargetClient()
+    patch_env(source=source, target=target)
+    pin_lines = []
+    monkeypatch.setattr(cli, "run_pin_challenge", lambda *, context_lines: pin_lines.extend(context_lines))
+
+    assert cli.main(["--project", "proj-x", "--target-namespace", "dev-x", "--clean"]) == 0
+    assert "clean   = (nothing to delete)" in pin_lines
+    assert target.deleted_batches == []
+
+
+def test_main_clean_refuses_the_default_namespace(patch_env, capsys):
+    source, target = patch_env(target=_FakeTargetClient(
+        namespace=None, existing={"user": [_target_entity("user", 1, namespace=None)]},
+    ))
+
+    rc = cli.main(["--project", "proj-x", "--target-namespace", "", "--clean"])
+
+    assert rc == 2
+    assert "--clean needs a non-empty --target-namespace" in capsys.readouterr().err
+    assert target.deleted_batches == []
+
+
+def test_main_without_clean_deletes_nothing(patch_env):
+    source = _FakeSourceClient(entities_by_kind={"user": [_entity("user", 1, {})]})
+    target = _FakeTargetClient(existing={"leftover": [_target_entity("leftover", 7)]})
+    patch_env(source=source, target=target)
+
+    assert cli.main(["--project", "proj-x", "--target-namespace", "dev-x", "--kinds", "user"]) == 0
+    assert target.deleted_batches == []
+    assert len(target.existing["leftover"]) == 1
 
 
 def test_database_arg_maps_default_alias_to_empty_string():

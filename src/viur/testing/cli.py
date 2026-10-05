@@ -50,6 +50,7 @@ Once the package is installed it exposes the ``viur-mirror`` console script
     viur-mirror --project my-gcp-project --target-namespace ak
     viur-mirror --project my-gcp-project --target-namespace ak --kinds user,page
     viur-mirror --project my-gcp-project --target-namespace ak --target-database viur-tests
+    viur-mirror --project my-gcp-project --target-namespace ak --clean
 
 From a source checkout (without installing the console script) the module is
 runnable directly via the same :func:`run` entry point::
@@ -227,6 +228,26 @@ def copy_kind(
     return copied
 
 
+def clean_kind(target, kind: str, *, batch_size: int | None = None) -> int:
+    """Delete every entity of *kind* in *target*'s namespace and return how
+    many were deleted. Keys-only queries, deleted in batches of *batch_size*
+    (default :data:`PUT_BATCH_SIZE`, the same 500-mutation commit cap).
+
+    Only ever called with the **target** client: the source is wrapped in a
+    :class:`~viur.testing.mirror.ReadOnlyClient` and could not delete anyway.
+    """
+    batch_size = PUT_BATCH_SIZE if batch_size is None else batch_size
+    deleted = 0
+    while True:
+        query = target.query(kind=kind)
+        query.keys_only()
+        keys = [entity.key for entity in query.fetch(limit=batch_size)]
+        if not keys:
+            return deleted
+        target.delete_multi(keys)
+        deleted += len(keys)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Copy a live (default) data slice into a test-DB namespace.",
@@ -253,6 +274,11 @@ def main(argv: list[str] | None = None) -> int:
         "--exclude", default=",".join(sorted(DEFAULT_EXCLUDE)),
         help="comma-separated kinds to never copy (secrets/sessions)",
     )
+    parser.add_argument(
+        "--clean", action="store_true",
+        help="empty the target namespace before copying: deletes every kind found "
+             "there (or only --kinds), minus --exclude",
+    )
     args = parser.parse_args(argv)
 
     # Hard safety guard: never write INTO the live database. Both "(default)"
@@ -262,6 +288,16 @@ def main(argv: list[str] | None = None) -> int:
             f"error: refusing to seed into the live {PROTECTED_TARGET_DATABASE!r} "
             "database — --target-database must be a separate test database "
             "(e.g. viur-tests).",
+            file=sys.stderr,
+        )
+        return 2
+
+    # The default namespace of the test database is shared (VIUR_TESTING=1);
+    # wiping it would hit everyone else using it. Clean only a named slice.
+    if args.clean and not args.target_namespace:
+        print(
+            "error: --clean needs a non-empty --target-namespace — refusing to "
+            "empty the shared default namespace of the test database.",
             file=sys.stderr,
         )
         return 2
@@ -287,16 +323,30 @@ def main(argv: list[str] | None = None) -> int:
         print("error: no kinds to copy after applying --exclude.", file=sys.stderr)
         return 2
 
+    # Clean enumerates the TARGET: kinds that only exist there (left behind by
+    # test runs) are exactly what a clean is for. Excludes win here too, so the
+    # slice keeps its own viur-conf/hmacKey.
+    clean_kinds: list[str] = []
+    if args.clean:
+        clean_kinds = explicit if explicit else enumerate_kinds(target, exclude)
+        clean_kinds = [k for k in clean_kinds if k not in exclude]
+
     # PIN gate — this reads the LIVE database. No TTY → run_pin_challenge raises.
-    run_pin_challenge(
-        context_lines=[
-            f"project = {project}",
-            f"source  = {args.source_database} / ns={source_namespace or '(default)'}  (LIVE)  [READ-ONLY]",
-            f"target  = {args.target_database} / ns={args.target_namespace}",
-            f"kinds   = {', '.join(kinds)}",
-            "copies LIVE data entity-by-entity into the test namespace.",
-        ],
-    )
+    context_lines = [
+        f"project = {project}",
+        f"source  = {args.source_database} / ns={source_namespace or '(default)'}  (LIVE)  [READ-ONLY]",
+        f"target  = {args.target_database} / ns={args.target_namespace}",
+        f"kinds   = {', '.join(kinds)}",
+    ]
+    if args.clean:
+        context_lines.append(f"clean   = {', '.join(clean_kinds) or '(nothing to delete)'}")
+        context_lines.append("DELETES those kinds in the target namespace first.")
+    context_lines.append("copies LIVE data entity-by-entity into the test namespace.")
+    run_pin_challenge(context_lines=context_lines)
+
+    for kind in clean_kinds:
+        n = clean_kind(target, kind)
+        print(f"  • {kind}: {n} deleted")
 
     total = 0
     skipped: list[tuple[str, object, int]] = []
